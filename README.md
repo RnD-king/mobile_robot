@@ -10,7 +10,7 @@ ros2 launch turtlebot3_nav cartographer_no_return_free.launch.py
 ros2 launch turtlebot3_nav turtlebot_nav_sim.launch.py
 
 
-
+'''
 ros2 topic pub --once /move_base_simple/goal geometry_msgs/msg/PoseStamped "
 header:
   frame_id: map
@@ -22,3 +22,4 @@ pose:
   orientation:
     w: 1.0
 "
+'''
