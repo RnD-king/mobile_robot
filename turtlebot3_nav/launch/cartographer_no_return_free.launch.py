@@ -15,6 +15,7 @@ def generate_launch_description():
     use_rviz = LaunchConfiguration('use_rviz', default='true')
     map_profile = LaunchConfiguration('map', default='house') # 'house' or 'world'
 
+    turtlebot3_nav_prefix = get_package_share_directory('turtlebot3_nav')
     turtlebot3_cartographer_prefix = get_package_share_directory('turtlebot3_cartographer')
     cartographer_config_dir = LaunchConfiguration(
         'cartographer_config_dir',
@@ -46,11 +47,12 @@ def generate_launch_description():
         value_type=float,
     )
 
-    rviz_config_dir = os.path.join(
-        turtlebot3_cartographer_prefix,
+    default_rviz_config = os.path.join(
+        turtlebot3_nav_prefix,
         'rviz',
-        'tb3_cartographer.rviz',
+        'hardware_nav.rviz',
     )
+    rviz_config = LaunchConfiguration('rviz_config')
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -92,6 +94,11 @@ def generate_launch_description():
             'cartographer_max_range',
             default_value=cartographer_max_range,
             description='Must match TRAJECTORY_BUILDER_2D.max_range in lua',
+        ),
+        DeclareLaunchArgument(
+            'rviz_config',
+            default_value=default_rviz_config,
+            description='RViz config file',
         ),
 
         Node(
@@ -144,7 +151,7 @@ def generate_launch_description():
             package='rviz2',
             executable='rviz2',
             name='rviz2',
-            arguments=['-d', rviz_config_dir],
+            arguments=['-d', rviz_config],
             parameters=[{'use_sim_time': use_sim_time_param}],
             condition=IfCondition(use_rviz),
             output='screen',

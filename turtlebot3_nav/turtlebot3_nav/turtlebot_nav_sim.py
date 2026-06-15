@@ -99,6 +99,7 @@ class TurtlebotNavSim(Node):
         self.blacklisted_subgoals: List[WorldPoint] = []
         self.visited_reachable_subgoals: List[WorldPoint] = []
         self.path_world: List[WorldPoint] = []
+        self.local_target_xy: Optional[WorldPoint] = None
         self.last_plan_time = self.get_clock().now()
         self.force_replan = True
         self.last_progress_xy: Optional[WorldPoint] = None
@@ -136,10 +137,10 @@ class TurtlebotNavSim(Node):
         self.declare_parameter('goal_x', 0.0)
         self.declare_parameter('goal_y', 0.0)
         self.declare_parameter('goal_tolerance', 0.15)
-        self.declare_parameter('linear_speed', 0.12)
-        self.declare_parameter('max_angular_speed', 0.8)
-        self.declare_parameter('yaw_gain', 1.2)
-        self.declare_parameter('lookahead_distance', 0.35)
+        self.declare_parameter('linear_speed', 0.22)
+        self.declare_parameter('max_angular_speed', 1.35)
+        self.declare_parameter('yaw_gain', 1.9)
+        self.declare_parameter('lookahead_distance', 0.50)
         self.declare_parameter('control_frequency', 10.0)
         self.declare_parameter('replan_period', 1.0)
         self.declare_parameter('occupied_threshold', 50)
@@ -151,6 +152,8 @@ class TurtlebotNavSim(Node):
         self.declare_parameter('path_smoothing_enabled', True)
         self.declare_parameter('smoothing_clearance_radius', 0.16)
         self.declare_parameter('emergency_stop_dist', 0.14)
+        self.declare_parameter('side_emergency_dist', 0.12)
+        self.declare_parameter('rear_emergency_dist', 0.10)
         self.declare_parameter('front_angle_deg', 30.0)
         self.declare_parameter('goal_block_search_radius', 0.45)
         self.declare_parameter('map_edge_margin', 0.20)
@@ -162,7 +165,8 @@ class TurtlebotNavSim(Node):
         self.declare_parameter('frontier_robot_weight', 0.35)
         self.declare_parameter('frontier_info_weight', 0.12)
         self.declare_parameter('frontier_switch_margin', 0.8)
-        self.declare_parameter('subgoal_commit_time', 3.0)
+        self.declare_parameter('subgoal_commit_time', 4.0)
+        self.declare_parameter('subgoal_early_release_distance', 0.55)
         self.declare_parameter('subgoal_blacklist_radius', 0.35)
         self.declare_parameter('reachable_switch_margin', 0.35)
         self.declare_parameter('reachable_visit_radius', 0.45)
@@ -173,18 +177,30 @@ class TurtlebotNavSim(Node):
         self.declare_parameter('optimistic_unknown_cost', 5.0)
         self.declare_parameter('optimistic_outside_map_cost', 8.0)
         self.declare_parameter('optimistic_max_expansions', 80000)
-        self.declare_parameter('min_linear_speed_scale', 0.22)
+        self.declare_parameter('subgoal_direction_switch_angle', 0.55)
+        self.declare_parameter('subgoal_large_switch_improvement', 1.20)
+        self.declare_parameter('subgoal_same_direction_tolerance', 0.05)
+        self.declare_parameter('local_target_switch_angle', 0.45)
+        self.declare_parameter('local_target_reached_distance', 0.16)
+        self.declare_parameter('local_target_path_tolerance', 0.30)
+        self.declare_parameter('local_target_large_switch_improvement', 0.35)
+        self.declare_parameter('rotation_debug_period', 2.0)
+        self.declare_parameter('min_linear_speed_scale', 0.40)
         self.declare_parameter('curvature_speed_gain', 0.45)
         self.declare_parameter('obstacle_slow_dist', 0.45)
+        self.declare_parameter('side_slow_dist', 0.24)
+        self.declare_parameter('obstacle_repulsion_dist', 0.34)
+        self.declare_parameter('obstacle_repulsion_gain', 0.60)
+        self.declare_parameter('side_balance_gain', 0.25)
+        self.declare_parameter('front_turn_gain', 0.55)
         self.declare_parameter('rotate_in_place_yaw', 1.10)
         self.declare_parameter('stuck_timeout', 4.0)
         self.declare_parameter('stuck_progress_distance', 0.08)
         self.declare_parameter('recovery_enabled', True)
-        self.declare_parameter('recovery_backup_speed', 0.045)
-        self.declare_parameter('recovery_turn_speed', 0.65)
-        self.declare_parameter('recovery_backup_duration', 0.8)
+        self.declare_parameter('recovery_turn_speed', 0.95)
         self.declare_parameter('recovery_turn_duration', 1.1)
-        self.declare_parameter('recovery_rear_stop_dist', 0.12)
+        self.declare_parameter('recovery_forward_speed', 0.08)
+        self.declare_parameter('recovery_forward_duration', 0.8)
         self.declare_parameter('use_scan_free_space_layer', True)
         self.declare_parameter('scan_free_space_max_range', 3.0)
         self.declare_parameter('scan_free_space_cost', 1.6)
@@ -227,6 +243,12 @@ class TurtlebotNavSim(Node):
         self.emergency_stop_dist = float(
             self.get_parameter('emergency_stop_dist').value
         )
+        self.side_emergency_dist = float(
+            self.get_parameter('side_emergency_dist').value
+        )
+        self.rear_emergency_dist = float(
+            self.get_parameter('rear_emergency_dist').value
+        )
         self.front_angle_deg = float(self.get_parameter('front_angle_deg').value)
         self.goal_block_search_radius = float(
             self.get_parameter('goal_block_search_radius').value
@@ -259,6 +281,9 @@ class TurtlebotNavSim(Node):
         self.subgoal_commit_time = float(
             self.get_parameter('subgoal_commit_time').value
         )
+        self.subgoal_early_release_distance = float(
+            self.get_parameter('subgoal_early_release_distance').value
+        )
         self.subgoal_blacklist_radius = float(
             self.get_parameter('subgoal_blacklist_radius').value
         )
@@ -289,6 +314,30 @@ class TurtlebotNavSim(Node):
         self.optimistic_max_expansions = int(
             self.get_parameter('optimistic_max_expansions').value
         )
+        self.subgoal_direction_switch_angle = float(
+            self.get_parameter('subgoal_direction_switch_angle').value
+        )
+        self.subgoal_large_switch_improvement = float(
+            self.get_parameter('subgoal_large_switch_improvement').value
+        )
+        self.subgoal_same_direction_tolerance = float(
+            self.get_parameter('subgoal_same_direction_tolerance').value
+        )
+        self.local_target_switch_angle = float(
+            self.get_parameter('local_target_switch_angle').value
+        )
+        self.local_target_reached_distance = float(
+            self.get_parameter('local_target_reached_distance').value
+        )
+        self.local_target_path_tolerance = float(
+            self.get_parameter('local_target_path_tolerance').value
+        )
+        self.local_target_large_switch_improvement = float(
+            self.get_parameter('local_target_large_switch_improvement').value
+        )
+        self.rotation_debug_period = float(
+            self.get_parameter('rotation_debug_period').value
+        )
         self.min_linear_speed_scale = float(
             self.get_parameter('min_linear_speed_scale').value
         )
@@ -298,6 +347,21 @@ class TurtlebotNavSim(Node):
         self.obstacle_slow_dist = float(
             self.get_parameter('obstacle_slow_dist').value
         )
+        self.side_slow_dist = float(
+            self.get_parameter('side_slow_dist').value
+        )
+        self.obstacle_repulsion_dist = float(
+            self.get_parameter('obstacle_repulsion_dist').value
+        )
+        self.obstacle_repulsion_gain = float(
+            self.get_parameter('obstacle_repulsion_gain').value
+        )
+        self.side_balance_gain = float(
+            self.get_parameter('side_balance_gain').value
+        )
+        self.front_turn_gain = float(
+            self.get_parameter('front_turn_gain').value
+        )
         self.rotate_in_place_yaw = float(
             self.get_parameter('rotate_in_place_yaw').value
         )
@@ -306,20 +370,17 @@ class TurtlebotNavSim(Node):
             self.get_parameter('stuck_progress_distance').value
         )
         self.recovery_enabled = bool(self.get_parameter('recovery_enabled').value)
-        self.recovery_backup_speed = float(
-            self.get_parameter('recovery_backup_speed').value
-        )
         self.recovery_turn_speed = float(
             self.get_parameter('recovery_turn_speed').value
-        )
-        self.recovery_backup_duration = float(
-            self.get_parameter('recovery_backup_duration').value
         )
         self.recovery_turn_duration = float(
             self.get_parameter('recovery_turn_duration').value
         )
-        self.recovery_rear_stop_dist = float(
-            self.get_parameter('recovery_rear_stop_dist').value
+        self.recovery_forward_speed = float(
+            self.get_parameter('recovery_forward_speed').value
+        )
+        self.recovery_forward_duration = float(
+            self.get_parameter('recovery_forward_duration').value
         )
         self.use_scan_free_space_layer = bool(
             self.get_parameter('use_scan_free_space_layer').value
@@ -371,6 +432,7 @@ class TurtlebotNavSim(Node):
         self.clear_active_subgoal()
         self.blacklisted_subgoals = []
         self.visited_reachable_subgoals = []
+        self.clear_local_target()
         self.last_progress_xy = None
         self.path_world = []
         self.map_dirty = True
@@ -400,6 +462,7 @@ class TurtlebotNavSim(Node):
         self.publish_nav_augmented_map()
 
         if self.goal_xy is None:
+            self.clear_local_target()
             self.stop_robot()
             return
         self.publish_goal_marker()
@@ -409,19 +472,22 @@ class TurtlebotNavSim(Node):
             if self.path_world:
                 self.get_logger().info('Goal reached.')
             self.path_world = []
+            self.clear_local_target()
             self.publish_path([])
             self.clear_active_subgoal()
             return
 
         if self.recovery_enabled and self.recovery_mode != 'idle':
+            self.clear_local_target()
             self.cmd_pub.publish(self.compute_recovery_command())
             return
 
-        if self.is_emergency_stop():
-            self.log_emergency_stop()
+        if self.is_safety_stop():
+            self.log_safety_stop()
             if self.recovery_enabled:
+                self.clear_local_target()
                 self.get_logger().warn(
-                    'Recovery requested by emergency stop.',
+                    'Recovery requested by safety stop.',
                     throttle_duration_sec=1.0,
                 )
                 self.cmd_pub.publish(self.compute_recovery_command())
@@ -910,10 +976,16 @@ class TurtlebotNavSim(Node):
             self.get_clock().now(), self.active_subgoal_set_time
         )
 
-    def active_subgoal_committed(self) -> bool:
+    def active_subgoal_committed(self, robot_xy: Optional[WorldPoint] = None) -> bool:
         if self.active_subgoal_xy is None:
             return False
         if self.active_subgoal_kind == 'goal':
+            return False
+        if (
+            robot_xy is not None
+            and self.distance(robot_xy, self.active_subgoal_xy)
+            <= self.subgoal_early_release_distance
+        ):
             return False
         return self.active_subgoal_elapsed() < self.subgoal_commit_time
 
@@ -962,6 +1034,68 @@ class TurtlebotNavSim(Node):
             for visited in self.visited_reachable_subgoals
         )
 
+    def should_switch_subgoal(
+        self,
+        robot_xy: WorldPoint,
+        candidate_point: WorldPoint,
+        candidate_kind: str,
+        candidate_goal_distance: float,
+    ) -> bool:
+        if self.active_subgoal_xy is None:
+            return True
+        if self.active_subgoal_kind == 'goal':
+            return True
+
+        current_goal_distance = self.distance(self.goal_xy, self.active_subgoal_xy)
+        improvement = current_goal_distance - candidate_goal_distance
+        direction_change = self.subgoal_direction_change(
+            robot_xy,
+            self.active_subgoal_xy,
+            candidate_point,
+        )
+
+        if direction_change <= self.subgoal_direction_switch_angle:
+            return improvement >= -self.subgoal_same_direction_tolerance
+
+        if improvement >= self.subgoal_large_switch_improvement:
+            self.get_logger().info(
+                f'Accepting large {candidate_kind} subgoal switch: '
+                f'improvement={improvement:.2f} m, '
+                f'direction_change={direction_change:.2f} rad.',
+                throttle_duration_sec=2.0,
+            )
+            return True
+
+        self.get_logger().info(
+            f'Keeping current {self.active_subgoal_kind} subgoal; '
+            f'{candidate_kind} switch is too abrupt '
+            f'(improvement={improvement:.2f} m, '
+            f'direction_change={direction_change:.2f} rad).',
+            throttle_duration_sec=2.0,
+        )
+        return False
+
+    def subgoal_direction_change(
+        self,
+        robot_xy: WorldPoint,
+        current_point: WorldPoint,
+        candidate_point: WorldPoint,
+    ) -> float:
+        current_dist = self.distance(robot_xy, current_point)
+        candidate_dist = self.distance(robot_xy, candidate_point)
+        if current_dist < 1.0e-3 or candidate_dist < 1.0e-3:
+            return 0.0
+
+        current_yaw = math.atan2(
+            current_point[1] - robot_xy[1],
+            current_point[0] - robot_xy[0],
+        )
+        candidate_yaw = math.atan2(
+            candidate_point[1] - robot_xy[1],
+            candidate_point[0] - robot_xy[0],
+        )
+        return abs(self.normalize_angle(candidate_yaw - current_yaw))
+
     # ---------------------------------- A* ----------------------------------
 
     def plan_path(self, robot_x: float, robot_y: float) -> bool:
@@ -1001,6 +1135,7 @@ class TurtlebotNavSim(Node):
                 )
                 return True
             self.path_world = []
+            self.clear_local_target()
             self.publish_path([])
             return False
 
@@ -1009,6 +1144,7 @@ class TurtlebotNavSim(Node):
             free_space_only=target_kind in ('goal', 'reachable', 'optimistic'),
         )
         self.path_world = [self.grid_to_world(cell) for cell in grid_path]
+        self.refresh_local_target_after_replan(robot_xy)
         self.publish_path(self.path_world)
         if self.active_subgoal_xy is not None:
             self.publish_active_subgoal()
@@ -1021,7 +1157,7 @@ class TurtlebotNavSim(Node):
     def plan_to_best_target(
         self, start: GridCell, robot_xy: WorldPoint
     ) -> Tuple[List[GridCell], str]:
-        if self.active_subgoal_committed():
+        if self.active_subgoal_committed(robot_xy):
             active_path = self.try_plan_to_active_subgoal(start)
             if active_path:
                 return active_path, self.active_subgoal_kind
@@ -1035,13 +1171,22 @@ class TurtlebotNavSim(Node):
         else:
             optimistic_path = self.try_plan_to_optimistic_subgoal(start, robot_xy)
             if optimistic_path:
-                return optimistic_path, 'optimistic'
+                return optimistic_path, self.active_subgoal_kind
+
+            if self.active_subgoal_xy is not None:
+                active_path = self.try_plan_to_active_subgoal(start)
+                if active_path:
+                    self.get_logger().info(
+                        'Keeping current subgoal after temporary optimistic failure.',
+                        throttle_duration_sec=2.0,
+                    )
+                    return active_path, self.active_subgoal_kind
 
             reachable_path = self.try_plan_to_closest_reachable_subgoal(
                 start, robot_xy
             )
             if reachable_path:
-                return reachable_path, 'reachable'
+                return reachable_path, self.active_subgoal_kind
 
         if self.active_subgoal_xy is not None:
             active_path = self.try_plan_to_active_subgoal(start)
@@ -1087,15 +1232,38 @@ class TurtlebotNavSim(Node):
         active_cell = self.world_to_grid_unbounded(
             self.active_subgoal_xy[0], self.active_subgoal_xy[1]
         )
-        active_cell = self.nearest_free_space_cell(
-            active_cell, self.goal_block_search_radius
-        )
+
+        if self.active_subgoal_kind == 'optimistic':
+            active_cell = self.nearest_plannable_cell(
+                active_cell, self.goal_block_search_radius
+            )
+        else:
+            active_cell = self.nearest_free_space_cell(
+                active_cell, self.goal_block_search_radius
+            )
         if active_cell is None:
             return []
 
         path = self.astar(start, active_cell, free_space_only=True)
         if path:
             return path
+
+        if self.active_subgoal_kind == 'optimistic':
+            bounds = self.optimistic_planning_bounds(start, active_cell)
+            path = self.astar(
+                start,
+                active_cell,
+                optimistic=True,
+                bounds=bounds,
+                max_expansions=self.optimistic_max_expansions,
+            )
+            if path:
+                self.get_logger().info(
+                    'Keeping optimistic subgoal through unknown/grey cells.',
+                    throttle_duration_sec=2.0,
+                )
+                return path
+
         return []
 
     def try_plan_to_optimistic_subgoal(
@@ -1111,7 +1279,7 @@ class TurtlebotNavSim(Node):
             max_expansions=self.optimistic_max_expansions,
         )
         if len(optimistic_path) < 2:
-            return []
+            return self.try_plan_to_optimistic_frontier_subgoal(start, robot_xy)
 
         min_robot_distance = max(0.20, min(self.lookahead_distance, 0.35))
         chosen_idx = None
@@ -1128,22 +1296,21 @@ class TurtlebotNavSim(Node):
             chosen_idx = idx
 
         if chosen_idx is None:
-            return []
+            return self.try_plan_to_optimistic_frontier_subgoal(start, robot_xy)
 
         subgoal_cell = optimistic_path[chosen_idx]
         subgoal_point = self.grid_to_world(subgoal_cell)
         goal_distance = self.distance(self.goal_xy, subgoal_point)
 
-        if (
-            self.active_subgoal_kind == 'optimistic'
-            and self.active_subgoal_xy is not None
+        if not self.should_switch_subgoal(
+            robot_xy,
+            subgoal_point,
+            'optimistic',
+            goal_distance,
         ):
-            current_goal_distance = self.distance(self.goal_xy, self.active_subgoal_xy)
-            improvement = current_goal_distance - goal_distance
-            if improvement < self.reachable_switch_margin:
-                active_path = self.try_plan_to_active_subgoal(start)
-                if active_path:
-                    return active_path
+            active_path = self.try_plan_to_active_subgoal(start)
+            if active_path:
+                return active_path
 
         if (
             self.active_subgoal_kind == 'optimistic'
@@ -1158,6 +1325,81 @@ class TurtlebotNavSim(Node):
             throttle_duration_sec=2.0,
         )
         return optimistic_path[:chosen_idx + 1]
+
+    def try_plan_to_optimistic_frontier_subgoal(
+        self, start: GridCell, robot_xy: WorldPoint
+    ) -> List[GridCell]:
+        reachable = self.reachable_known_free_cells(start)
+        if not reachable:
+            return []
+
+        min_robot_distance = max(0.30, self.lookahead_distance)
+        candidates: List[Tuple[float, float, GridCell]] = []
+        for cell in reachable:
+            point = self.grid_to_world(cell)
+            if self.distance(robot_xy, point) < min_robot_distance:
+                continue
+            if self.is_blacklisted_subgoal(point):
+                continue
+            if not self.is_frontier_cell(cell):
+                continue
+
+            goal_distance = self.distance(self.goal_xy, point)
+            visit_penalty = self.reachable_visit_penalty_for(point)
+            path_hint = self.distance(robot_xy, point)
+            score = (
+                goal_distance
+                + visit_penalty
+                + self.reachable_path_cost_weight * path_hint
+            )
+            candidates.append((score, goal_distance, cell))
+
+        candidates.sort(key=lambda item: item[0])
+
+        best_path: List[GridCell] = []
+        best_point: Optional[WorldPoint] = None
+        best_goal_distance = math.inf
+        best_score = math.inf
+
+        for candidate_score, goal_distance, candidate in candidates[:100]:
+            path = self.astar(start, candidate, free_space_only=True)
+            if not path or len(path) < 2:
+                continue
+            path_cost = self.grid_path_cost(path) * self.map_msg.info.resolution
+            score = candidate_score + self.reachable_path_cost_weight * path_cost
+            point = self.grid_to_world(candidate)
+            if score < best_score:
+                best_score = score
+                best_goal_distance = goal_distance
+                best_point = point
+                best_path = path
+
+        if not best_path or best_point is None:
+            return []
+
+        if not self.should_switch_subgoal(
+            robot_xy,
+            best_point,
+            'optimistic-frontier',
+            best_goal_distance,
+        ):
+            active_path = self.try_plan_to_active_subgoal(start)
+            if active_path:
+                return active_path
+
+        if (
+            self.active_subgoal_kind in ('optimistic', 'reachable')
+            and self.active_subgoal_xy is not None
+            and self.distance(self.active_subgoal_xy, best_point) > 0.05
+        ):
+            self.remember_reachable_subgoal(self.active_subgoal_xy)
+
+        self.set_active_subgoal(best_point, 'optimistic', best_goal_distance)
+        self.get_logger().info(
+            'Optimistic path to final goal failed; using goal-directed frontier.',
+            throttle_duration_sec=2.0,
+        )
+        return best_path
 
     def optimistic_planning_bounds(
         self, start: GridCell, goal: GridCell
@@ -1234,13 +1476,15 @@ class TurtlebotNavSim(Node):
         if not best_path or best_point is None:
             return []
 
-        if self.active_subgoal_kind == 'reachable' and self.active_subgoal_xy is not None:
-            current_goal_distance = self.distance(self.goal_xy, self.active_subgoal_xy)
-            improvement = current_goal_distance - best_goal_distance
-            if improvement < self.reachable_switch_margin:
-                active_path = self.try_plan_to_active_subgoal(start)
-                if active_path:
-                    return active_path
+        if not self.should_switch_subgoal(
+            robot_xy,
+            best_point,
+            'reachable',
+            best_goal_distance,
+        ):
+            active_path = self.try_plan_to_active_subgoal(start)
+            if active_path:
+                return active_path
 
         if (
             self.active_subgoal_kind == 'reachable'
@@ -1517,11 +1761,10 @@ class TurtlebotNavSim(Node):
                 nx = gx + dx
                 ny = gy + dy
                 neighbor = (nx, ny)
-                if not self.is_plannable_cell(neighbor):
+                if not self.is_inside_grid(nx, ny):
                     return True
                 if (
-                    self.is_inside_grid(nx, ny)
-                    and self.map_msg.data[ny * self.map_msg.info.width + nx] < 0
+                    self.map_msg.data[ny * self.map_msg.info.width + nx] < 0
                     and neighbor not in self.recent_scan_free_cells()
                 ):
                     return True
@@ -1788,35 +2031,39 @@ class TurtlebotNavSim(Node):
         return False
 
     def update_progress_monitor(self, robot_xy: WorldPoint, robot_yaw: float) -> bool:
+        now = self.get_clock().now()
+
         if not self.path_world:
             self.last_progress_xy = robot_xy
-            self.last_progress_time = self.get_clock().now()
+            self.last_progress_time = now
             return False
 
         target = self.select_lookahead_point(robot_xy[0], robot_xy[1])
         if target is None:
             self.last_progress_xy = robot_xy
-            self.last_progress_time = self.get_clock().now()
+            self.last_progress_time = now
             return False
 
         heading_distance = self.distance(robot_xy, target)
         if heading_distance < self.goal_tolerance:
             self.last_progress_xy = robot_xy
-            self.last_progress_time = self.get_clock().now()
+            self.last_progress_time = now
+            return False
+
+        if self.last_progress_xy is None:
+            self.last_progress_xy = robot_xy
+            self.last_progress_time = now
             return False
 
         target_yaw = math.atan2(target[1] - robot_xy[1], target[0] - robot_xy[0])
         yaw_error = abs(self.normalize_angle(target_yaw - robot_yaw))
         if yaw_error > self.rotate_in_place_yaw * 0.8:
-            self.last_progress_xy = robot_xy
-            self.last_progress_time = self.get_clock().now()
-            return False
-
-        now = self.get_clock().now()
-        if self.last_progress_xy is None:
-            self.last_progress_xy = robot_xy
-            self.last_progress_time = now
-            return False
+            if self.distance(robot_xy, self.last_progress_xy) >= self.stuck_progress_distance:
+                self.last_progress_xy = robot_xy
+                self.last_progress_time = now
+                return False
+            rotation_timeout = max(self.stuck_timeout, 5.0)
+            return self.elapsed_seconds(now, self.last_progress_time) > rotation_timeout
 
         if self.distance(robot_xy, self.last_progress_xy) >= self.stuck_progress_distance:
             self.last_progress_xy = robot_xy
@@ -1842,9 +2089,23 @@ class TurtlebotNavSim(Node):
             -self.max_angular_speed,
             min(self.max_angular_speed, self.yaw_gain * yaw_error),
         )
+        repulsion_angular = self.obstacle_repulsion_angular()
+        angular = max(
+            -self.max_angular_speed,
+            min(self.max_angular_speed, angular + repulsion_angular),
+        )
 
         if abs(yaw_error) > self.rotate_in_place_yaw:
             linear = 0.0
+            if self.rotation_debug_period > 0.0:
+                self.get_logger().info(
+                    'Rotate-in-place control: '
+                    f'robot=({robot_x:.2f}, {robot_y:.2f}, yaw={robot_yaw:.2f}), '
+                    f'target=({target[0]:.2f}, {target[1]:.2f}), '
+                    f'target_yaw={target_yaw:.2f}, yaw_error={yaw_error:.2f}, '
+                    f'angular={angular:.2f}',
+                    throttle_duration_sec=self.rotation_debug_period,
+                )
         else:
             yaw_scale = max(
                 self.min_linear_speed_scale,
@@ -1852,12 +2113,14 @@ class TurtlebotNavSim(Node):
             )
             curvature_scale = 1.0 / (1.0 + self.curvature_speed_gain * curvature)
             obstacle_scale = self.front_obstacle_speed_scale()
+            side_scale = self.side_obstacle_speed_scale()
             cost_scale = self.local_cost_speed_scale(target)
             linear = (
                 self.linear_speed
                 * yaw_scale
                 * curvature_scale
                 * obstacle_scale
+                * side_scale
                 * cost_scale
             )
 
@@ -1876,6 +2139,48 @@ class TurtlebotNavSim(Node):
         ratio = (self.front_min - self.emergency_stop_dist) / span
         return max(self.min_linear_speed_scale, min(1.0, ratio))
 
+    def side_obstacle_speed_scale(self) -> float:
+        side_min = min(self.left_min, self.right_min)
+        if not math.isfinite(side_min):
+            return 1.0
+        if side_min <= self.side_emergency_dist:
+            return 0.0
+        if side_min >= self.side_slow_dist:
+            return 1.0
+        span = max(0.01, self.side_slow_dist - self.side_emergency_dist)
+        ratio = (side_min - self.side_emergency_dist) / span
+        return max(self.min_linear_speed_scale, min(1.0, ratio))
+
+    def obstacle_repulsion_angular(self) -> float:
+        angular = 0.0
+
+        if math.isfinite(self.left_min) and self.left_min < self.obstacle_repulsion_dist:
+            ratio = (
+                self.obstacle_repulsion_dist - self.left_min
+            ) / max(0.01, self.obstacle_repulsion_dist - self.emergency_stop_dist)
+            angular -= self.side_balance_gain * max(0.0, min(1.0, ratio))
+
+        if math.isfinite(self.right_min) and self.right_min < self.obstacle_repulsion_dist:
+            ratio = (
+                self.obstacle_repulsion_dist - self.right_min
+            ) / max(0.01, self.obstacle_repulsion_dist - self.emergency_stop_dist)
+            angular += self.side_balance_gain * max(0.0, min(1.0, ratio))
+
+        if math.isfinite(self.front_min) and self.front_min < self.obstacle_slow_dist:
+            ratio = (
+                self.obstacle_slow_dist - self.front_min
+            ) / max(0.01, self.obstacle_slow_dist - self.emergency_stop_dist)
+            angular += (
+                self.choose_recovery_turn_direction()
+                * self.front_turn_gain
+                * max(0.0, min(1.0, ratio))
+            )
+
+        return max(
+            -self.max_angular_speed,
+            min(self.max_angular_speed, angular * self.obstacle_repulsion_gain),
+        )
+
     def local_cost_speed_scale(self, target: WorldPoint) -> float:
         cell = self.world_to_grid_unbounded(target[0], target[1])
         if self.costmap is None:
@@ -1887,7 +2192,50 @@ class TurtlebotNavSim(Node):
             return 1.0
         return max(self.min_linear_speed_scale, 1.0 / (1.0 + 0.12 * (cost - 1.0)))
 
+    def refresh_local_target_after_replan(self, robot_xy: WorldPoint):
+        if self.local_target_xy is None or not self.path_world:
+            return
+
+        candidate = self.select_raw_lookahead_point(
+            robot_xy[0],
+            robot_xy[1],
+            prune_path=False,
+        )
+        if candidate is None:
+            self.clear_local_target()
+            return
+
+        if not self.is_local_target_usable(robot_xy, self.local_target_xy, candidate):
+            self.clear_local_target()
+            return
+
+        direction_change = self.subgoal_direction_change(
+            robot_xy,
+            self.local_target_xy,
+            candidate,
+        )
+        if direction_change > max(0.90, self.local_target_switch_angle * 2.0):
+            self.clear_local_target()
+
     def select_lookahead_point(self, robot_x: float, robot_y: float) -> Optional[WorldPoint]:
+        candidate = self.select_raw_lookahead_point(robot_x, robot_y)
+        if candidate is None:
+            self.clear_local_target()
+            return None
+
+        robot_xy = (robot_x, robot_y)
+        if not self.is_local_target_usable(robot_xy, self.local_target_xy, candidate):
+            self.local_target_xy = candidate
+            return self.local_target_xy
+
+        if self.should_switch_local_target(robot_xy, candidate):
+            self.local_target_xy = candidate
+
+        return self.local_target_xy
+
+    def select_raw_lookahead_point(
+        self, robot_x: float, robot_y: float, prune_path: bool = True
+    ) -> Optional[WorldPoint]:
         if not self.path_world:
             return None
 
@@ -1901,14 +2249,111 @@ class TurtlebotNavSim(Node):
                 nearest_dist = dist
 
         # Drop waypoints behind the nearest point to keep tracking stable.
-        if nearest_idx > 0:
+        path = self.path_world
+        if nearest_idx > 0 and prune_path:
             self.path_world = self.path_world[nearest_idx:]
+            path = self.path_world
+        elif nearest_idx > 0:
+            path = self.path_world[nearest_idx:]
 
-        for point in self.path_world:
+        for point in path:
             if self.distance(robot, point) >= self.lookahead_distance:
                 return point
 
-        return self.path_world[-1]
+        return path[-1]
+
+    def is_local_target_usable(
+        self,
+        robot_xy: WorldPoint,
+        target: Optional[WorldPoint],
+        raw_candidate: WorldPoint,
+    ) -> bool:
+        if target is None or not self.path_world:
+            return False
+        if self.distance(robot_xy, target) < self.local_target_reached_distance:
+            return False
+
+        if self.path_progress_ahead(target, raw_candidate):
+            return False
+
+        cell = self.world_to_grid_unbounded(target[0], target[1])
+        if not self.is_plannable_cell(cell):
+            return False
+
+        return self.distance_to_path(target) <= self.local_target_path_tolerance
+
+    def should_switch_local_target(
+        self, robot_xy: WorldPoint, candidate: WorldPoint
+    ) -> bool:
+        if self.local_target_xy is None:
+            return True
+
+        direction_change = self.subgoal_direction_change(
+            robot_xy,
+            self.local_target_xy,
+            candidate,
+        )
+        if self.path_progress_ahead(self.local_target_xy, candidate):
+            return True
+
+        if direction_change <= self.local_target_switch_angle:
+            return True
+
+        if self.active_subgoal_xy is not None:
+            current_dist = self.distance(self.local_target_xy, self.active_subgoal_xy)
+            candidate_dist = self.distance(candidate, self.active_subgoal_xy)
+            improvement = current_dist - candidate_dist
+            if improvement >= self.local_target_large_switch_improvement:
+                return True
+
+        self.get_logger().info(
+            f'Keeping local target; candidate jump is too abrupt '
+            f'(direction_change={direction_change:.2f} rad).',
+            throttle_duration_sec=1.5,
+        )
+        return False
+
+    def nearest_path_index(self, point: WorldPoint) -> int:
+        if not self.path_world:
+            return 0
+
+        best_idx = 0
+        best_dist = math.inf
+        for idx, path_point in enumerate(self.path_world):
+            dist = self.distance(point, path_point)
+            if dist < best_dist:
+                best_idx = idx
+                best_dist = dist
+        return best_idx
+
+    def path_progress_ahead(
+        self, current_target: WorldPoint, candidate: WorldPoint
+    ) -> bool:
+        if not self.path_world:
+            return False
+
+        current_idx = self.nearest_path_index(current_target)
+        candidate_idx = self.nearest_path_index(candidate)
+        if candidate_idx <= current_idx:
+            return False
+
+        progress_distance = 0.0
+        for idx in range(current_idx, candidate_idx):
+            progress_distance += self.distance(
+                self.path_world[idx],
+                self.path_world[idx + 1],
+            )
+
+        return progress_distance >= self.local_target_reached_distance
+
+    def distance_to_path(self, point: WorldPoint) -> float:
+        if not self.path_world:
+            return math.inf
+
+        best = math.inf
+        for path_point in self.path_world:
+            best = min(best, self.distance(point, path_point))
+        return best
 
     def publish_path(self, path_world: List[WorldPoint]):
         msg = Path()
@@ -1951,6 +2396,19 @@ class TurtlebotNavSim(Node):
         marker.color.g = 0.75
         marker.color.b = 0.05
         marker.color.a = 0.95
+        self.local_target_marker_pub.publish(marker)
+
+    def clear_local_target(self):
+        self.local_target_xy = None
+        self.delete_local_target_marker()
+
+    def delete_local_target_marker(self):
+        marker = Marker()
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.header.frame_id = self.map_frame
+        marker.ns = 'turtlebot_nav_sim'
+        marker.id = 1
+        marker.action = Marker.DELETE
         self.local_target_marker_pub.publish(marker)
 
     def publish_goal_marker(self):
@@ -2119,71 +2577,117 @@ class TurtlebotNavSim(Node):
 
         return front_min, left_min, right_min, rear_min
 
-    def is_emergency_stop(self) -> bool:
+    def is_front_danger(self) -> bool:
         return self.front_min < self.emergency_stop_dist
 
-    def log_emergency_stop(self):
+    def is_left_danger(self) -> bool:
+        return self.left_min < self.side_emergency_dist
+
+    def is_right_danger(self) -> bool:
+        return self.right_min < self.side_emergency_dist
+
+    def is_rear_danger(self) -> bool:
+        return self.rear_min < self.rear_emergency_dist
+
+    def is_side_danger(self) -> bool:
+        return self.is_left_danger() or self.is_right_danger()
+
+    def is_safety_stop(self) -> bool:
+        return (
+            self.is_front_danger()
+            or self.is_side_danger()
+            or self.is_rear_danger()
+        )
+
+    def is_recovery_forward_safe(self) -> bool:
+        return not (self.is_front_danger() or self.is_side_danger())
+
+    def log_safety_stop(self):
         now = self.get_clock().now()
         if self.elapsed_seconds(now, self.last_emergency_log) > 1.0:
             self.get_logger().warn(
-                f'Emergency stop: front_min={self.front_min:.3f} m '
-                f'< {self.emergency_stop_dist:.3f} m'
+                'Safety stop: '
+                f'front={self.front_min:.3f}/{self.emergency_stop_dist:.3f}, '
+                f'left={self.left_min:.3f}/{self.side_emergency_dist:.3f}, '
+                f'right={self.right_min:.3f}/{self.side_emergency_dist:.3f}, '
+                f'rear={self.rear_min:.3f}/{self.rear_emergency_dist:.3f}'
             )
             self.last_emergency_log = now
 
     def compute_recovery_command(self) -> Twist:
         now = self.get_clock().now()
 
-        if self.recovery_mode == 'turn' and now >= self.recovery_end_time:
+        if self.recovery_mode == 'forward' and now >= self.recovery_end_time:
             self.recovery_mode = 'idle'
             self.path_world = []
+            self.clear_local_target()
             self.map_dirty = True
             self.force_replan = True
             self.last_progress_xy = None
             return Twist()
 
-        if self.recovery_mode == 'backup' and now >= self.recovery_end_time:
+        if self.recovery_mode == 'forward' and not self.is_recovery_forward_safe():
+            self.recovery_turn_direction = self.choose_recovery_turn_direction()
             self.recovery_mode = 'turn'
             self.recovery_end_time = now + Duration(
                 seconds=self.recovery_turn_duration
             )
             self.get_logger().warn(
-                'Recovery: turning toward clearer side.',
+                'Recovery: clearance is still unsafe, turning again.',
                 throttle_duration_sec=1.0,
             )
 
-        if self.recovery_mode == 'idle':
-            self.recovery_turn_direction = self.choose_recovery_turn_direction()
-            if self.rear_min > self.recovery_rear_stop_dist:
-                self.recovery_mode = 'backup'
+        if self.recovery_mode == 'turn' and now >= self.recovery_end_time:
+            if self.is_recovery_forward_safe():
+                self.recovery_mode = 'forward'
                 self.recovery_end_time = now + Duration(
-                    seconds=self.recovery_backup_duration
+                    seconds=self.recovery_forward_duration
                 )
                 self.get_logger().warn(
-                    'Recovery: backing up before turning.',
+                    'Recovery: moving after turning toward clear space.',
                     throttle_duration_sec=1.0,
                 )
             else:
-                self.recovery_mode = 'turn'
+                self.recovery_turn_direction = self.choose_recovery_turn_direction()
                 self.recovery_end_time = now + Duration(
                     seconds=self.recovery_turn_duration
                 )
                 self.get_logger().warn(
-                    'Recovery: rear is blocked, turning in place.',
+                    'Recovery: not enough clearance, continuing turn.',
                     throttle_duration_sec=1.0,
                 )
 
+        if self.recovery_mode == 'idle':
+            self.recovery_turn_direction = self.choose_recovery_turn_direction()
+            self.recovery_mode = 'turn'
+            self.recovery_end_time = now + Duration(
+                seconds=self.recovery_turn_duration
+            )
+            self.get_logger().warn(
+                'Recovery: turning toward clearer side before moving.',
+                throttle_duration_sec=1.0,
+            )
+
         cmd = Twist()
-        if self.recovery_mode == 'backup':
-            cmd.linear.x = -self.recovery_backup_speed
-        elif self.recovery_mode == 'turn':
+        if self.recovery_mode == 'turn':
             cmd.angular.z = self.recovery_turn_direction * self.recovery_turn_speed
             self.path_world = []
+            self.clear_local_target()
+            self.map_dirty = True
+        elif self.recovery_mode == 'forward':
+            cmd.linear.x = self.recovery_forward_speed
+            cmd.angular.z = self.obstacle_repulsion_angular()
+            self.path_world = []
+            self.clear_local_target()
             self.map_dirty = True
         return cmd
 
     def choose_recovery_turn_direction(self) -> float:
         # Positive angular velocity turns left. Choose the side with more room.
+        if self.is_left_danger() and not self.is_right_danger():
+            return -1.0
+        if self.is_right_danger() and not self.is_left_danger():
+            return 1.0
         if self.left_min >= self.right_min:
             return 1.0
         return -1.0

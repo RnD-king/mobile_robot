@@ -1,0 +1,62 @@
+# Edit only this file to change obstacle positions.
+# Coordinate frame: Gazebo world frame.
+# yaw_deg: rotation around z-axis in degrees.
+# z should usually stay 0.0 because both models define their origin on the floor.
+
+obstacles:
+  - name: trash_can_1
+    type: trash_can_50cm
+    enabled: true
+    x: 2.20
+    y: 0.25
+    z: 0.0
+    yaw_deg: 0.0
+    
+
+  - name: trash_can_5
+    type: trash_can_50cm
+    enabled: true
+    x: 2.20
+    y: 1.25
+    z: 0.0
+    yaw_deg: 0.0
+    
+  - name: trash_can_6
+    type: trash_can_50cm
+    enabled: true
+    x: 2.20
+    y: -0.75
+    z: 0.0
+    yaw_deg: 0.0
+
+  - name: trash_can_3
+    type: trash_can_50cm
+    enabled: true
+    x: 4.20
+    y: 1.25
+    z: 0.0
+    yaw_deg: 0.0
+
+  - name: trash_can_4
+    type: trash_can_50cm
+    enabled: true
+    x: 1.20
+    y: 0.25
+    z: 0.0
+    yaw_deg: 0.0
+
+  - name: l_obstacle_1
+    type: l_obstacle_50cm
+    enabled: true
+    x: 3.40
+    y: -0.45
+    z: 0.0
+    yaw_deg: 0.0
+
+  - name: l_obstacle_2
+    type: l_obstacle_50cm
+    enabled: true
+    x: 3.40
+    y: 0.45
+    z: 0.0
+    yaw_deg: 180.0
